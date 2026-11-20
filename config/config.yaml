@@ -19,6 +19,10 @@ jaeger:
   enabled: true
   command: jaeger
   model: jaeger_448931d3_1.3M_fragment
+  # Shortest contig accepted on Jaeger's call alone. 0 accepts any length, which suits
+  # particle-enriched viromes. For samples with much bacterial DNA, 5000 avoids most of
+  # Jaeger's false calls on short contigs.
+  min_length: 0
 
 # Species-level clusters of viral contigs, pooled over all samples.
 clustering:

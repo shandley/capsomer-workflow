@@ -163,7 +163,11 @@ rule select_viruses:
         table=f"{OUT}/viruses/{{sample}}.tsv",
     params:
         script=SCRIPTS / "select_viruses.py",
-        jaeger=lambda wc, input: f"--jaeger {input.jaeger}" if USE_JAEGER else "",
+        jaeger=lambda wc, input: (
+            f"--jaeger {input.jaeger} --jaeger-min-length {JAEGER.get('min_length', 0)}"
+            if USE_JAEGER
+            else ""
+        ),
     shell:
         "python {params.script} {input.contigs} {input.genomad} {input.plasmids} "
         "{output.fasta} {output.table} {params.jaeger}"

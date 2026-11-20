@@ -4,6 +4,11 @@ Everything geNomad lists as a virus is kept, proviruses included. A contig
 that only Jaeger calls viral is added whole, unless geNomad listed it as a
 plasmid or found a provirus on it. The table says which tool or tools called
 each sequence, so a later reader can keep only the ones both agree on.
+
+Jaeger adds most on contigs under about 5 kb, where geNomad's default rule
+asks for a hallmark gene. That is also where Jaeger errs most: in our test it
+called 7% of non-viral 2 kb pieces viral. A minimum length for contigs taken
+on Jaeger's call alone trades those finds against those errors.
 """
 
 import argparse
@@ -38,6 +43,12 @@ def main() -> None:
     parser.add_argument("fasta_out", type=Path)
     parser.add_argument("table_out", type=Path)
     parser.add_argument("--jaeger", type=Path, help="Jaeger's per-sequence table")
+    parser.add_argument(
+        "--jaeger-min-length",
+        type=int,
+        default=0,
+        help="shortest contig accepted on Jaeger's call alone",
+    )
     args = parser.parse_args()
 
     jaeger: set[str] = set()
@@ -62,7 +73,13 @@ def main() -> None:
             fasta.write(f">{name}\n{bases}\n")
             table.write(f"{name}\t{contig}\t{evidence}\n")
         for name, bases in records(args.contigs):
-            if name in jaeger and name not in used and name not in plasmids:
+            long_enough = len(bases) >= args.jaeger_min_length
+            if (
+                name in jaeger
+                and name not in used
+                and name not in plasmids
+                and long_enough
+            ):
                 fasta.write(f">{name}\n{bases}\n")
                 table.write(f"{name}\t{name}\tJaeger\n")
 

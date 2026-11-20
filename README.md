@@ -25,15 +25,17 @@ Most viromes are dominated by phage, and phage analysis is best developed for as
 
 A contig is treated as viral if geNomad calls it viral, or if Jaeger does and geNomad did not call it a plasmid. Both tools' calls are stored in the dataset, along with the workflow's decision and which tool or tools stood behind it, so you can keep only the contigs both agree on.
 
-The pairing comes from a [comparison of five classifiers](https://github.com/shandley/capsomer/tree/main/examples/classifier_benchmark) on 5 kb pieces, which included 600 viral genomes made public after every tool's database was built:
+The pairing comes from a [comparison of five classifiers](https://github.com/shandley/capsomer/tree/main/examples/classifier_benchmark) on pieces of 2, 5 and 10 kb, which included about 1,000 viral genomes made public after the tools' databases were built:
 
-- geNomad and Jaeger found the most viruses and made the fewest calls on non-viral DNA.
-- They work differently (marker genes against a neural network on the sequence alone) and miss different viruses. On pieces unlike anything in RefSeq, geNomad found 79% alone and 90% with Jaeger.
+- The two tools are strong at different contig lengths. Jaeger reads the sequence alone and needs no genes, so it found the most viruses on pieces of 5 kb and shorter. geNomad uses marker genes and found the most at 10 kb.
+- Together they found more than either alone at every length. On pieces unlike anything in RefSeq, the pair found 83% at 2 kb, 90% at 5 kb and 94% at 10 kb; geNomad alone found 24%, 79% and 90%.
+- Jaeger's extra finds come with extra errors on short contigs: it called 7% of non-viral 2 kb pieces viral, against 1% for geNomad.
+- geNomad with relaxed filters was not a substitute. On 2 kb pieces it found fewer of the novel viruses than Jaeger and made nearly three times the false calls.
 - VirSorter2 found fewer viruses than geNomad at every level of novelty and took six to nine times as long, so it is not included.
 
 On one simulated test sample, adding Jaeger raised the truly viral contigs recovered from 73 to 80 of 112, with no non-viral contig added. That sample contains only RefSeq viruses.
 
-Set `jaeger: enabled: false` in the configuration to use geNomad alone.
+Two settings control this. `jaeger: min_length` sets the shortest contig accepted on Jaeger's call alone; the default of 0 suits particle-enriched viromes, and 5000 is a sensible value for samples with much bacterial DNA. Set `jaeger: enabled: false` in the configuration to use geNomad alone.
 
 The identity and coverage cutoffs for clustering, the minimum contig length and the assembler are settings in `config/config.yaml`. Each is recorded in the dataset with the run that used it.
 

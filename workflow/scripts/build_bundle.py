@@ -57,7 +57,11 @@ def one_taxon_per_sequence(builder: Builder) -> None:
 
 
 def add_decision(
-    builder: Builder, results: Path, samples: list[str], inputs: list[str]
+    builder: Builder,
+    results: Path,
+    samples: list[str],
+    inputs: list[str],
+    jaeger_min_length: int,
 ) -> int:
     """Record the workflow's own viral call for every sequence, as the preferred row.
 
@@ -83,7 +87,8 @@ def add_decision(
         description="The workflow's viral call: geNomad's viruses plus contigs only Jaeger calls viral.",
         parent=PIPELINE,
         parameters={
-            "rule": "geNomad virus, or Jaeger phage or virus and not a geNomad plasmid"
+            "rule": "geNomad virus, or Jaeger phage or virus and not a geNomad plasmid",
+            "jaeger_only_min_length": jaeger_min_length,
         },
         inputs=inputs,
     )
@@ -207,7 +212,7 @@ def build(snakemake: Any) -> bool:
             )
         deciders = [f"genomad.{s}" for s in samples]
         deciders += [f"jaeger.{s}" for s in samples] if use_jaeger else []
-        add_decision(b, results, samples, deciders)
+        add_decision(b, results, samples, deciders, int(jaeger.get("min_length", 0)))
         add_clusters(
             b,
             results / "clusters" / "clusters.tsv",
