@@ -1,8 +1,8 @@
-# Capsomer workflow (working name)
+# capsomer-workflow
 
 A Snakemake workflow for virome analysis that works on contigs first and writes every result into one [Capsomer](https://github.com/shandley/capsomer) dataset.
 
-Status: an early draft. It has run end to end on two simulated samples. The name is a placeholder.
+Status: an early draft. It has run end to end on two simulated samples.
 
 ## What it does
 
@@ -59,3 +59,7 @@ uv run capsomer sql results/bundle "SELECT run_id, call, count(*) FROM viral_cal
 Contig names in the dataset are the sample name, two underscores, and the assembler's own name. A contig assembled identically in two samples is one sequence in the dataset, with one source row per sample.
 
 The intermediate files of each tool stay under `<output>` in a folder named for the step.
+
+## Licence
+
+MIT. See `LICENSE`.
