@@ -12,6 +12,14 @@ databases:
   genomad: databases/genomad_db
   checkv: databases/checkv-db-v1.5
 
+# Viral contigs are everything geNomad calls viral, plus contigs only Jaeger calls viral.
+# Jaeger is in its own environment (workflow/envs/jaeger.yaml). Download a model once with:
+#   jaeger download --path databases/jaeger --model_name jaeger_448931d3_1.3M_fragment
+jaeger:
+  enabled: true
+  command: jaeger
+  model: jaeger_448931d3_1.3M_fragment
+
 # Species-level clusters of viral contigs, pooled over all samples.
 clustering:
   algorithm: leiden

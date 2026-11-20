@@ -19,6 +19,8 @@ if ASSEMBLER not in ("megahit", "metaspades"):
     raise ValueError("assembler must be megahit or metaspades")
 THREADS = config["threads"]
 CLUSTER = config["clustering"]
+JAEGER = config.get("jaeger", {})
+USE_JAEGER = bool(JAEGER.get("enabled", True))
 SCRIPTS = Path(workflow.basedir) / "scripts"
 
 
@@ -113,6 +115,7 @@ rule genomad:
     output:
         summary=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_virus_summary.tsv",
         viruses=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_virus.fna",
+        plasmids=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_plasmid_summary.tsv",
     log:
         f"{OUT}/logs/genomad/{{sample}}.log",
     params:
@@ -125,9 +128,50 @@ rule genomad:
         "{input.db} > {log} 2>&1"
 
 
+rule jaeger:
+    # A second classifier that reads the sequence alone, with no reference search.
+    # It finds viruses unlike any in the reference databases that geNomad misses.
+    input:
+        rules.contigs.output[0],
+    output:
+        f"{OUT}/jaeger/{{sample}}.tsv",
+    log:
+        f"{OUT}/logs/jaeger/{{sample}}.log",
+    params:
+        folder=f"{OUT}/jaeger/{{sample}}",
+        command=JAEGER.get("command", "jaeger"),
+        model=JAEGER.get("model", "jaeger_448931d3_1.3M_fragment"),
+    threads: threads_for("jaeger")
+    conda:
+        "envs/jaeger.yaml"
+    shell:
+        "{params.command} predict -i {input} -o {params.folder} -m {params.model} "
+        "--workers {threads} > {log} 2>&1 && "
+        "cp \"$(ls {params.folder}/*/{wildcards.sample}.tsv | head -1)\" {output}"
+
+
+rule select_viruses:
+    # The viral set: everything geNomad calls viral, plus contigs only Jaeger calls viral.
+    # Each sequence keeps a note of which tool or tools called it.
+    input:
+        contigs=rules.contigs.output[0],
+        genomad=rules.genomad.output.viruses,
+        plasmids=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_plasmid_summary.tsv",
+        jaeger=(rules.jaeger.output[0] if USE_JAEGER else []),
+    output:
+        fasta=f"{OUT}/viruses/{{sample}}.fna",
+        table=f"{OUT}/viruses/{{sample}}.tsv",
+    params:
+        script=SCRIPTS / "select_viruses.py",
+        jaeger=lambda wc, input: f"--jaeger {input.jaeger}" if USE_JAEGER else "",
+    shell:
+        "python {params.script} {input.contigs} {input.genomad} {input.plasmids} "
+        "{output.fasta} {output.table} {params.jaeger}"
+
+
 rule checkv:
     input:
-        fasta=rules.genomad.output.viruses,
+        fasta=rules.select_viruses.output.fasta,
         db=config["databases"]["checkv"],
     output:
         f"{OUT}/checkv/{{sample}}/quality_summary.tsv",
@@ -144,7 +188,7 @@ rule checkv:
 
 rule pool_viruses:
     input:
-        expand(rules.genomad.output.viruses, sample=SAMPLES),
+        expand(rules.select_viruses.output.fasta, sample=SAMPLES),
     output:
         f"{OUT}/clusters/viral_sequences.fna",
     shell:
@@ -231,7 +275,14 @@ rule versions:
     shell:
         "for tool in fastp megahit spades.py genomad checkv vclust minimap2 samtools coverm; do "
         '  printf "%s\\t%s\\n" "$tool" "$($tool --version 2>&1 | head -1)"; '
-        "done > {output}"
+        "done > {output}; "
+        + (
+            'printf "jaeger\\t%s\\n" "$({JAEGER_COMMAND} --version 2>&1 | tail -1)" >> {{output}}'.format(
+                JAEGER_COMMAND=JAEGER.get("command", "jaeger")
+            )
+            if USE_JAEGER
+            else "true"
+        )
 
 
 rule bundle:
@@ -241,6 +292,8 @@ rule bundle:
         reports=expand(rules.trim.output.report, sample=SAMPLES),
         contigs=expand(rules.contigs.output[0], sample=SAMPLES),
         genomad=expand(rules.genomad.output.summary, sample=SAMPLES),
+        jaeger=(expand(rules.jaeger.output[0], sample=SAMPLES) if USE_JAEGER else []),
+        selected=expand(rules.select_viruses.output.table, sample=SAMPLES),
         checkv=expand(rules.checkv.output[0], sample=SAMPLES),
         clusters=rules.cluster.output.clusters,
         representatives=rules.representatives.output.fasta,

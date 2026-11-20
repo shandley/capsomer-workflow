@@ -4,6 +4,8 @@ A Snakemake workflow for virome analysis that works on contigs first and writes 
 
 Status: an early draft. It has run end to end on two simulated samples.
 
+The workflow is opinionated. Each step uses the tool that did best in a comparison on sequences of known origin, and the reason is stated below. Conventional choices that did worse are left out.
+
 ## What it does
 
 Most viromes are dominated by phage, and phage analysis is best developed for assembled contigs. The workflow follows that route:
@@ -12,12 +14,26 @@ Most viromes are dominated by phage, and phage analysis is best developed for as
 |---|---|---|
 | Trim adapters and low-quality bases | fastp | per sample |
 | Assemble | MEGAHIT or metaSPAdes | per sample |
-| Decide which contigs are viral, and name them | geNomad | per sample |
+| Decide which contigs are viral, and name them | geNomad and Jaeger | per sample |
 | Estimate completeness and contamination | CheckV | per sample |
 | Group viral contigs into species-level clusters | vclust | pooled over all samples |
 | Map reads to the cluster representatives | minimap2 | per sample |
 | Count reads and depth on each representative | CoverM | all samples |
 | Write and check the Capsomer dataset | capsomer | all samples |
+
+## How viral contigs are chosen
+
+A contig is treated as viral if geNomad calls it viral, or if Jaeger does and geNomad did not call it a plasmid. Both tools' calls are stored in the dataset, along with the workflow's decision and which tool or tools stood behind it, so you can keep only the contigs both agree on.
+
+The pairing comes from a [comparison of five classifiers](https://github.com/shandley/capsomer/tree/main/examples/classifier_benchmark) on 5 kb pieces, which included 600 viral genomes made public after every tool's database was built:
+
+- geNomad and Jaeger found the most viruses and made the fewest calls on non-viral DNA.
+- They work differently (marker genes against a neural network on the sequence alone) and miss different viruses. On pieces unlike anything in RefSeq, geNomad found 79% alone and 90% with Jaeger.
+- VirSorter2 found fewer viruses than geNomad at every level of novelty and took six to nine times as long, so it is not included.
+
+On one simulated test sample, adding Jaeger raised the truly viral contigs recovered from 73 to 80 of 112, with no non-viral contig added. That sample contains only RefSeq viruses.
+
+Set `jaeger: enabled: false` in the configuration to use geNomad alone.
 
 The identity and coverage cutoffs for clustering, the minimum contig length and the assembler are settings in `config/config.yaml`. Each is recorded in the dataset with the run that used it.
 
@@ -30,7 +46,7 @@ The identity and coverage cutoffs for clustering, the minimum contig length and 
 
 ## Run it
 
-The workflow needs [uv](https://docs.astral.sh/uv/) and the tools in `workflow/envs/tools.yaml`. Either put the tools on your `PATH`, or let Snakemake build the environment with `--use-conda`.
+The workflow needs [uv](https://docs.astral.sh/uv/), the tools in `workflow/envs/tools.yaml`, and Jaeger, which has its own environment in `workflow/envs/jaeger.yaml`. Either put the tools on your `PATH` and give the path to `jaeger` in the configuration, or let Snakemake build the environments with `--use-conda`.
 
 ```sh
 uv sync
@@ -38,6 +54,7 @@ uv sync
 # Databases, once (about 8 GB together).
 genomad download-database databases
 checkv download_database databases
+jaeger download --path databases/jaeger --model_name jaeger_448931d3_1.3M_fragment
 
 # Edit config/config.yaml and config/samples.tsv, then:
 uv run snakemake --cores 12 -n     # dry run

@@ -9,7 +9,9 @@ from typing import Any
 
 from capsomer.builder import Builder
 from capsomer.importers.checkv import add_checkv
+from capsomer.importers.classifiers import add_jaeger
 from capsomer.importers.clusters import add_clusters
+from capsomer.importers.common import load_fasta
 from capsomer.importers.contigs import add_contigs
 from capsomer.importers.genomad import add_genomad
 from capsomer.importers.mapping import add_coverm, add_read_mapping
@@ -41,18 +43,68 @@ def study_table(source: Path, out: Path) -> None:
         writer.writerows(rows)
 
 
-def one_answer_per_sequence(builder: Builder) -> None:
-    """Flag one geNomad row per sequence as the pipeline's answer.
+def one_taxon_per_sequence(builder: Builder) -> None:
+    """Flag one geNomad taxon per sequence as the pipeline's answer.
 
     Each sample has its own geNomad run. A contig assembled identically in two
-    samples is one sequence with a call from each run, and only one can be preferred.
+    samples is one sequence with a taxon from each run, and only one can be preferred.
     """
-    for table in ("viral_call", "taxon_assignment"):
-        builder.con.execute(
-            f"UPDATE {table} AS t SET is_preferred = (t.run_id = (SELECT min(o.run_id) FROM {table} o "
-            "WHERE o.sequence_id = t.sequence_id AND o.run_id LIKE 'genomad.%')) "
-            "WHERE t.run_id LIKE 'genomad.%'"
+    builder.con.execute(
+        "UPDATE taxon_assignment AS t SET is_preferred = (t.run_id = (SELECT min(o.run_id) "
+        "FROM taxon_assignment o WHERE o.sequence_id = t.sequence_id AND o.run_id LIKE 'genomad.%')) "
+        "WHERE t.run_id LIKE 'genomad.%'"
+    )
+
+
+def add_decision(
+    builder: Builder, results: Path, samples: list[str], inputs: list[str]
+) -> int:
+    """Record the workflow's own viral call for every sequence, as the preferred row.
+
+    A sequence is viral if the selection step kept it in any sample. Otherwise
+    it keeps geNomad's call. The evidence column names the tool or tools behind
+    each viral call.
+    """
+    con = builder.con
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _kept (sequence_id VARCHAR, evidence VARCHAR)"
+    )
+    for s in samples:
+        load_fasta(con, results / "viruses" / f"{s}.fna")
+        chosen = str(results / "viruses" / f"{s}.tsv").replace("'", "''")
+        con.execute(
+            "INSERT INTO _kept SELECT f.sequence_id, t.evidence FROM _fasta f JOIN read_csv("
+            f"'{chosen}', delim='\\t', header=true, all_varchar=true) t ON t.name = f.name"
         )
+    builder.add_run(
+        "decision",
+        tool="capsomer-workflow",
+        step="viral_identification",
+        description="The workflow's viral call: geNomad's viruses plus contigs only Jaeger calls viral.",
+        parent=PIPELINE,
+        parameters={
+            "rule": "geNomad virus, or Jaeger phage or virus and not a geNomad plasmid"
+        },
+        inputs=inputs,
+    )
+    added = builder.add(
+        "viral_call",
+        "WITH kept AS (SELECT sequence_id, CASE WHEN bool_or(evidence = 'geNomad and Jaeger') "
+        "OR (bool_or(evidence = 'geNomad') AND bool_or(evidence = 'Jaeger')) THEN 'geNomad and Jaeger' "
+        "ELSE min(evidence) END AS evidence FROM _kept GROUP BY 1), "
+        "genomad AS (SELECT sequence_id, min(call) FILTER (WHERE call <> 'none') AS call FROM viral_call "
+        "WHERE run_id LIKE 'genomad.%' GROUP BY 1) "
+        "SELECT sequence_id, 'decision' AS run_id, "
+        "CASE WHEN k.sequence_id IS NOT NULL THEN 'virus' ELSE coalesce(g.call, 'none') END AS call, "
+        "true AS is_preferred, k.evidence FROM genomad g FULL JOIN kept k USING (sequence_id)",
+    )
+    builder.describe(
+        "viral_call",
+        {
+            "evidence": "For the workflow's viral calls: the tool or tools that called the sequence viral."
+        },
+    )
+    return added
 
 
 def build(snakemake: Any) -> bool:
@@ -83,6 +135,8 @@ def build(snakemake: Any) -> bool:
     )
     checkv_match = re.search(r"v(\d+(?:\.\d+)*)$", checkv_db.name)
     clustering = config["clustering"]
+    jaeger = config.get("jaeger") or {}
+    use_jaeger = bool(jaeger.get("enabled", True))
     viruses = results / "clusters" / "viral_sequences.fna"
     representatives = results / "clusters" / "representatives.fna"
 
@@ -130,16 +184,30 @@ def build(snakemake: Any) -> bool:
                 inputs=[f"assembly.{s}"],
                 parent=PIPELINE,
             )
+            if use_jaeger:
+                add_jaeger(
+                    b,
+                    results / "jaeger" / f"{s}.tsv",
+                    contigs,
+                    run_id=f"jaeger.{s}",
+                    tool_version=version.get("jaeger"),
+                    inputs=[f"assembly.{s}"],
+                    parent=PIPELINE,
+                    parameters={"model": jaeger.get("model")},
+                )
             add_checkv(
                 b,
                 results / "checkv" / s,
-                results / "genomad" / s / f"{s}_summary" / f"{s}_virus.fna",
+                results / "viruses" / f"{s}.fna",
                 run_id=f"checkv.{s}",
                 tool_version=version.get("checkv"),
                 database_version=checkv_match.group(1) if checkv_match else None,
-                inputs=[f"genomad.{s}"],
+                inputs=["decision"],
                 parent=PIPELINE,
             )
+        deciders = [f"genomad.{s}" for s in samples]
+        deciders += [f"jaeger.{s}" for s in samples] if use_jaeger else []
+        add_decision(b, results, samples, deciders)
         add_clusters(
             b,
             results / "clusters" / "clusters.tsv",
@@ -149,14 +217,14 @@ def build(snakemake: Any) -> bool:
             tool_version=version.get("vclust"),
             level="species",
             layout="vclust",
-            inputs=[f"genomad.{s}" for s in samples],
+            inputs=["decision"],
             parent=PIPELINE,
             parameters={
                 "algorithm": clustering["algorithm"],
                 "metric": "ani",
                 "min_ani": clustering["min_ani"],
                 "min_query_coverage": clustering["min_coverage"],
-                "members": "sequences geNomad called virus, from every sample",
+                "members": "sequences the workflow called viral, from every sample",
             },
         )
         for s in samples:
@@ -188,7 +256,7 @@ def build(snakemake: Any) -> bool:
                 "methods": "count mean covered_fraction covered_bases",
             },
         )
-        one_answer_per_sequence(b)
+        one_taxon_per_sequence(b)
 
     findings = validate(bundle)
     report = format_report(findings)

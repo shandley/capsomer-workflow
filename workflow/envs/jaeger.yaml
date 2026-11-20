@@ -1,0 +1,11 @@
+# Jaeger is installed from PyPI. On an Apple Silicon Mac use jaeger-bio[darwin-arm], take
+# parasail-python from bioconda, and remove tensorflow-metal if TensorFlow fails to load.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - parasail-python
+  - pip
+  - pip:
+      - jaeger-bio[cpu]==1.26.5
