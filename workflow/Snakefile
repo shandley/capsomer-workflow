@@ -1,0 +1,257 @@
+# Contig-first virome workflow. Every result ends up in one Capsomer bundle.
+#
+#   reads -> trim -> assemble per sample -> viral identification -> genome quality
+#         -> species-level clusters across samples -> map reads to representatives -> bundle
+
+import csv
+from pathlib import Path
+
+
+configfile: "config/config.yaml"
+
+
+OUT = config["output"]
+with open(config["samples"]) as handle:
+    TABLE = {row["sample_id"]: row for row in csv.DictReader(handle, delimiter="\t")}
+SAMPLES = sorted(TABLE)
+ASSEMBLER = config["assembler"]
+if ASSEMBLER not in ("megahit", "metaspades"):
+    raise ValueError("assembler must be megahit or metaspades")
+THREADS = config["threads"]
+CLUSTER = config["clustering"]
+SCRIPTS = Path(workflow.basedir) / "scripts"
+
+
+def threads_for(rule_name):
+    return THREADS.get(rule_name, THREADS["default"])
+
+
+rule all:
+    input:
+        f"{OUT}/bundle/validation.txt",
+
+
+rule trim:
+    input:
+        r1=lambda wc: TABLE[wc.sample]["r1"],
+        r2=lambda wc: TABLE[wc.sample]["r2"],
+    output:
+        r1=f"{OUT}/qc/{{sample}}_R1.fastq.gz",
+        r2=f"{OUT}/qc/{{sample}}_R2.fastq.gz",
+        report=f"{OUT}/qc/{{sample}}.fastp.json",
+    log:
+        f"{OUT}/logs/trim/{{sample}}.log",
+    threads: threads_for("trim")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "fastp -i {input.r1:q} -I {input.r2:q} -o {output.r1} -O {output.r2} "
+        "--detect_adapter_for_pe --json {output.report} --html /dev/null "
+        "--thread {threads} 2> {log}"
+
+
+rule megahit:
+    input:
+        r1=rules.trim.output.r1,
+        r2=rules.trim.output.r2,
+    output:
+        f"{OUT}/assembly/megahit/{{sample}}/final.contigs.fa",
+    log:
+        f"{OUT}/logs/megahit/{{sample}}.log",
+    params:
+        folder=lambda wc, output: Path(output[0]).parent,
+        min_length=config["min_contig_length"],
+    threads: threads_for("megahit")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        # MEGAHIT refuses an output folder that exists, and Snakemake creates it.
+        "rmdir {params.folder} && megahit -1 {input.r1} -2 {input.r2} -o {params.folder} "
+        "--min-contig-len {params.min_length} -t {threads} > {log} 2>&1"
+
+
+rule metaspades:
+    input:
+        r1=rules.trim.output.r1,
+        r2=rules.trim.output.r2,
+    output:
+        f"{OUT}/assembly/metaspades/{{sample}}/contigs.fasta",
+    log:
+        f"{OUT}/logs/metaspades/{{sample}}.log",
+    params:
+        folder=lambda wc, output: Path(output[0]).parent,
+    threads: threads_for("metaspades")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "spades.py --meta -1 {input.r1} -2 {input.r2} -o {params.folder} -t {threads} > {log} 2>&1"
+
+
+rule contigs:
+    # Keep contigs of the minimum length and put the sample in each name, so
+    # names stay unique when samples are pooled.
+    input:
+        lambda wc: (
+            f"{OUT}/assembly/megahit/{wc.sample}/final.contigs.fa"
+            if ASSEMBLER == "megahit"
+            else f"{OUT}/assembly/metaspades/{wc.sample}/contigs.fasta"
+        ),
+    output:
+        f"{OUT}/contigs/{{sample}}.fasta",
+    params:
+        min_length=config["min_contig_length"],
+        script=SCRIPTS / "contigs.py",
+    shell:
+        "python {params.script} {input} {output} --sample {wildcards.sample} "
+        "--min-length {params.min_length}"
+
+
+rule genomad:
+    input:
+        fasta=rules.contigs.output[0],
+        db=config["databases"]["genomad"],
+    output:
+        summary=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_virus_summary.tsv",
+        viruses=f"{OUT}/genomad/{{sample}}/{{sample}}_summary/{{sample}}_virus.fna",
+    log:
+        f"{OUT}/logs/genomad/{{sample}}.log",
+    params:
+        folder=f"{OUT}/genomad/{{sample}}",
+    threads: threads_for("genomad")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "genomad end-to-end --cleanup --threads {threads} {input.fasta} {params.folder} "
+        "{input.db} > {log} 2>&1"
+
+
+rule checkv:
+    input:
+        fasta=rules.genomad.output.viruses,
+        db=config["databases"]["checkv"],
+    output:
+        f"{OUT}/checkv/{{sample}}/quality_summary.tsv",
+    log:
+        f"{OUT}/logs/checkv/{{sample}}.log",
+    params:
+        folder=f"{OUT}/checkv/{{sample}}",
+    threads: threads_for("checkv")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "checkv end_to_end {input.fasta} {params.folder} -t {threads} -d {input.db} > {log} 2>&1"
+
+
+rule pool_viruses:
+    input:
+        expand(rules.genomad.output.viruses, sample=SAMPLES),
+    output:
+        f"{OUT}/clusters/viral_sequences.fna",
+    shell:
+        "cat {input} > {output}"
+
+
+rule cluster:
+    input:
+        rules.pool_viruses.output[0],
+    output:
+        clusters=f"{OUT}/clusters/clusters.tsv",
+        ani=f"{OUT}/clusters/ani.tsv",
+        ids=f"{OUT}/clusters/ani.ids.tsv",
+        prefilter=temp(f"{OUT}/clusters/prefilter.txt"),
+    log:
+        f"{OUT}/logs/cluster.log",
+    params:
+        algorithm=CLUSTER["algorithm"],
+        ani=CLUSTER["min_ani"],
+        coverage=CLUSTER["min_coverage"],
+    threads: threads_for("cluster")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "(vclust prefilter -i {input} -o {output.prefilter} -t {threads} && "
+        "vclust align -i {input} -o {output.ani} --filter {output.prefilter} -t {threads} && "
+        "vclust cluster -i {output.ani} -o {output.clusters} --ids {output.ids} "
+        "--algorithm {params.algorithm} --metric ani --ani {params.ani} --qcov {params.coverage} -r"
+        ") > {log} 2>&1"
+
+
+rule representatives:
+    input:
+        clusters=rules.cluster.output.clusters,
+        fasta=rules.pool_viruses.output[0],
+    output:
+        fasta=f"{OUT}/clusters/representatives.fna",
+        names=temp(f"{OUT}/clusters/representatives.txt"),
+        index=temp(f"{OUT}/clusters/viral_sequences.fna.fai"),
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "tail -n +2 {input.clusters} | cut -f2 | sort -u > {output.names} && "
+        "samtools faidx {input.fasta} -r {output.names} -n 0 > {output.fasta}"
+
+
+rule map_reads:
+    input:
+        fasta=rules.representatives.output.fasta,
+        r1=rules.trim.output.r1,
+        r2=rules.trim.output.r2,
+    output:
+        f"{OUT}/map/{{sample}}.bam",
+    log:
+        f"{OUT}/logs/map/{{sample}}.log",
+    threads: threads_for("map_reads")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "(minimap2 -ax sr -t {threads} {input.fasta} {input.r1} {input.r2} "
+        "| samtools sort -@ 2 -o {output} -) 2> {log}"
+
+
+rule coverage:
+    input:
+        expand(rules.map_reads.output[0], sample=SAMPLES),
+    output:
+        f"{OUT}/map/coverm.tsv",
+    log:
+        f"{OUT}/logs/coverage.log",
+    threads: threads_for("coverage")
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "coverm contig -b {input} -m count mean covered_fraction covered_bases "
+        "-t {threads} -o {output} 2> {log}"
+
+
+rule versions:
+    output:
+        f"{OUT}/versions.tsv",
+    conda:
+        "envs/tools.yaml"
+    shell:
+        "for tool in fastp megahit spades.py genomad checkv vclust minimap2 samtools coverm; do "
+        '  printf "%s\\t%s\\n" "$tool" "$($tool --version 2>&1 | head -1)"; '
+        "done > {output}"
+
+
+rule bundle:
+    input:
+        samples=config["samples"],
+        versions=rules.versions.output[0],
+        reports=expand(rules.trim.output.report, sample=SAMPLES),
+        contigs=expand(rules.contigs.output[0], sample=SAMPLES),
+        genomad=expand(rules.genomad.output.summary, sample=SAMPLES),
+        checkv=expand(rules.checkv.output[0], sample=SAMPLES),
+        clusters=rules.cluster.output.clusters,
+        representatives=rules.representatives.output.fasta,
+        coverage=rules.coverage.output[0],
+    output:
+        manifest=f"{OUT}/bundle/manifest.json",
+        report=f"{OUT}/bundle/validation.txt",
+    log:
+        f"{OUT}/logs/bundle.log",
+    params:
+        results=OUT,
+        samples=SAMPLES,
+    script:
+        "scripts/build_bundle.py"

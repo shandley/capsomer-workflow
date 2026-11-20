@@ -1,0 +1,14 @@
+# The versions the workflow was last tested with.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - fastp=1.4.0
+  - megahit=1.2.9
+  - spades=4.3.0
+  - genomad=1.13.0
+  - checkv=1.1.1
+  - vclust=1.3.1
+  - minimap2=2.31
+  - samtools=1.25
+  - coverm=0.8.0

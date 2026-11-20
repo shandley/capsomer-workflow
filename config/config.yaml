@@ -1,0 +1,27 @@
+# One row per sample: sample_id, r1, r2, then any study metadata columns.
+samples: config/samples.tsv
+
+# Where results are written. The Capsomer bundle is in <output>/bundle.
+output: results
+
+# megahit or metaspades. Each sample is assembled on its own.
+assembler: megahit
+min_contig_length: 1000
+
+databases:
+  genomad: databases/genomad_db
+  checkv: databases/checkv-db-v1.5
+
+# Species-level clusters of viral contigs, pooled over all samples.
+clustering:
+  algorithm: leiden
+  min_ani: 0.95
+  min_coverage: 0.85
+
+threads:
+  default: 8
+  # MEGAHIT 1.2.9 crashes with more than one thread on Apple Silicon. Set megahit: 1 there.
+
+bundle:
+  id: my-study
+  title: My virome study

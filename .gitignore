@@ -1,0 +1,8 @@
+.venv/
+.snakemake/
+results/
+test/
+databases/
+__pycache__/
+*.pyc
+.ruff_cache/
